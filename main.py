@@ -4,10 +4,16 @@ import time
 import RPi.GPIO as GPIO
 import subprocess
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Setup GPIO pin for interrupts
 BUTTON_GPIO = 16
+
+# Recordings
+# intro.wav - Regular intro
+# evening.wav - Intro after 7pm
+# caller_fifty.wav - Intro for 50th caller
+# beep.wav - beep
 
 # Finite State Machine for Phone
 # FSM states are:
@@ -20,6 +26,8 @@ BUTTON_GPIO = 16
 #   playing -> #stopPlayback ->  waiting - GPIO interrupt, phone_down = True
 #   playing -> #record -> recording - Playback ended, phone_down = False
 #   recording -> #stopRecording -> waiting - GPIO interrupt, phone_down = True
+#   recording -> #phoneStuck -> phone-stuck - Hit max recording duration
+#   phone-stuck -> #wait -> waiting - GPIO interrupt, phone_down = True
 
 class FSM:
   def __init__(self):
@@ -28,15 +36,27 @@ class FSM:
       ('waiting', False): self.play,
       ('playing', True): self.stopPlayback,
       ('playing', False): self.record,
-      ('recording', True): self.stopRecording
+      ('recording', True): self.stopRecording,
+      ('phone-stuck', True): self.wait,
+      ('phone-stuck', False): self.phoneStuck
     }
     self.p = None
     self.r = None
+    self.beep = None
     self.message_count = 0
+    self.boot_up_time = datetime.now()
+    self.recording_ended = False
 
   def handleGPIOEvent(self, phone_down):
     if (self.state, phone_down) in self.transitions:
       self.transitions[(self.state, phone_down)]()
+
+  def selectMessage(self):
+    if self.message_count == 3:
+      return "caller_fifty.wav"
+    if datetime.now() > (self.boot_up_time + timedelta(minutes=3)):
+      return "evening.wav"
+    return "intro.wav"
 
   def play(self):
     print("Playing!")
@@ -44,8 +64,10 @@ class FSM:
     # Start pre-recorded message via command
     def start_via_thread():
       time.sleep(0.25)
-      self.p = subprocess.Popen(['aplay', 'intro.wav'])
+      message_file = self.selectMessage()
+      self.p = subprocess.Popen(['aplay', message_file])
       returncode = self.p.wait()
+      self.playBeep()
       if returncode == 0:
         # Playback finished completely
         if not GPIO.input(BUTTON_GPIO):
@@ -80,14 +102,33 @@ class FSM:
       self.r.wait()
       subprocess.run(['cp', filename, backup_spot])
       self.wait()
+      if self.recording_ended:
+        # Put down the phone to end recording, do nothing, reset flag
+        self.recording_ended = False
+      else:
+        self.phoneStuck()
 
     threading.Thread(target=start_via_thread).start()
     self.message_count += 1
 
   def stopRecording(self):
     if self.r:
+      self.recording_ended = True
       self.r.kill()
       self.r = None
+
+  def playBeep(self):
+    def start_via_thread():
+      self.beep = subprocess.Popen(['aplay', 'beep.wav'])
+      self.beep.wait()
+    threading.Thread(target=start_via_thread).start()
+
+  def phoneStuck(self):
+    print("Phone Stuck!")
+    self.state = 'phone-stuck'
+    self.playBeep()
+    time.sleep(1)
+    self.handleGPIOEvent(GPIO.input(BUTTON_GPIO))
 
 
 # Create FSM object for tracking state
