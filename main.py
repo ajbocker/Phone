@@ -30,7 +30,7 @@ BUTTON_GPIO = 16
 #   phone-stuck -> #wait -> waiting - GPIO interrupt, phone_down = True
 
 class FSM:
-  def __init__(self):
+  def __init__(self, usb_directory):
     self.state = 'waiting'
     self.transitions = {
       ('waiting', False): self.play,
@@ -46,15 +46,17 @@ class FSM:
     self.message_count = 0
     self.boot_up_time = datetime.now()
     self.recording_ended = False
+    self.usb_directory = usb_directory
 
   def handleGPIOEvent(self, phone_down):
     if (self.state, phone_down) in self.transitions:
       self.transitions[(self.state, phone_down)]()
 
   def selectMessage(self):
-    if self.message_count == 3:
+    # First caller is message_count == 0
+    if self.message_count == 49:
       return "caller_fifty.wav"
-    if datetime.now() > (self.boot_up_time + timedelta(minutes=3)):
+    if datetime.now() > (self.boot_up_time + timedelta(hours=8)):
       return "evening.wav"
     return "intro.wav"
 
@@ -67,9 +69,9 @@ class FSM:
       message_file = self.selectMessage()
       self.p = subprocess.Popen(['aplay', message_file])
       returncode = self.p.wait()
-      self.playBeep()
       if returncode == 0:
         # Playback finished completely
+        self.playBeep()
         if not GPIO.input(BUTTON_GPIO):
           self.record()
         else:
@@ -95,17 +97,18 @@ class FSM:
     print("Recording!")
     self.state = 'recording'
     filename = "recordings/" + datetime.now().strftime("%d-%b-%Y_%H-%M-%S") + "_recording.wav"
-    backup_spot = "/media/pi/4084-5B00/" + filename 
+    backup_spot = self.usb_directory + "/" + filename
     # Start recording via command
     def start_via_thread():
       self.r = subprocess.Popen(['arecord', '--device=hw:1,0', '--format', 'S16_LE', '-d', '180', '--rate', '44100', '-c1', filename])
       self.r.wait()
       subprocess.run(['cp', filename, backup_spot])
-      self.wait()
       if self.recording_ended:
         # Put down the phone to end recording, do nothing, reset flag
         self.recording_ended = False
+        self.wait()
       else:
+        self.r = None
         self.phoneStuck()
 
     threading.Thread(target=start_via_thread).start()
@@ -118,10 +121,8 @@ class FSM:
       self.r = None
 
   def playBeep(self):
-    def start_via_thread():
-      self.beep = subprocess.Popen(['aplay', 'beep.wav'])
-      self.beep.wait()
-    threading.Thread(target=start_via_thread).start()
+    self.beep = subprocess.Popen(['aplay', 'beep.wav'])
+    self.beep.wait()
 
   def phoneStuck(self):
     print("Phone Stuck!")
@@ -131,8 +132,13 @@ class FSM:
     self.handleGPIOEvent(GPIO.input(BUTTON_GPIO))
 
 
+def get_usb_directory():
+  process = subprocess.Popen("sudo cat /proc/mounts | grep sda1 | awk '{print $2}'", stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+  out, err = process.communicate()
+  return out.decode("UTF-8").strip()
+
 # Create FSM object for tracking state
-fsm = FSM()
+fsm = FSM(get_usb_directory())
 
 def signal_handler(sig, frame):
   GPIO.cleanup()
